@@ -1,20 +1,24 @@
 # GitHub Repo Stats To Parquet
 
-This repository contains a Python script that exports repository metadata, GitHub stats, and a file-level inventory for every repository owned by a GitHub user or organization.
+This repository contains a Python script that exports one Parquet row per GitHub repository.
 
-## What It Exports
+## Output Format
 
-The script writes one Parquet file per dataset:
+The script writes a single file:
 
-- `repos.parquet`: repository metadata and counters.
-- `languages.parquet`: language byte counts per repository.
-- `contributors.parquet`: contributors and contribution counts.
-- `commit_activity_weekly.parquet`: weekly commit totals for the last year.
-- `code_frequency_weekly.parquet`: weekly additions and deletions.
-- `participation_weekly.parquet`: weekly owner and total commit participation.
-- `punch_card.parquet`: commits grouped by weekday and hour.
-- `files.parquet`: file path, size in bytes, extension, binary flag, and line count.
-- `run_manifest.parquet`: run-level metadata.
+- `repositories.parquet`
+
+Each row represents one repository and contains:
+
+- repository metadata and counters from GitHub
+- language totals as JSON
+- contributor summaries as JSON
+- GitHub stats payloads as JSON
+- file inventory summary columns such as `file_count`, `total_file_size_bytes`, and `total_line_count`
+- a nested `files` column with a list of:
+  - `path`
+  - `size_bytes`
+  - `line_count` when available
 
 ## Requirements
 
@@ -57,6 +61,8 @@ python github_repo_stats_to_parquet.py --owner some-account --owner-type auto
 ## Notes
 
 - File inventories are computed from shallow clones of each repository.
-- Repositories without a default branch are skipped for file inventory collection.
-- Large files above 5 MiB keep size information, but line counting is skipped to avoid excessive memory use.
+- Repositories without a default branch keep an empty file list and an explanatory error field.
+- The fast inventory path does not require `line_count`. In tree-based runs, `line_count` may be `null`.
+- Large files above 5 MiB keep size information, but line counting is skipped when line counting is enabled.
+- Some GitHub stats endpoints may remain unavailable and are stored as empty JSON payloads when GitHub does not materialize them in time.
 - The script checks the available GitHub API quota before the run and fails fast if the remaining quota is not enough for the selected repository count.

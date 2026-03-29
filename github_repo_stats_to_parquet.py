@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Export GitHub repository metadata, stats, and file inventories to Parquet."""
+"""Export one Parquet row per GitHub repository with nested file inventory."""
 
 from __future__ import annotations
 
@@ -31,128 +31,95 @@ DEFAULT_RATE_LIMIT_BUFFER_SECONDS = 2
 DEFAULT_HTTP_RETRIES = 5
 
 
-TABLE_SCHEMAS: dict[str, pa.Schema] = {
-    "repos": pa.schema(
+FILES_TYPE = pa.list_(
+    pa.struct(
         [
-            ("owner", pa.string()),
-            ("owner_type", pa.string()),
-            ("repo_name", pa.string()),
-            ("full_name", pa.string()),
-            ("private", pa.bool_()),
-            ("fork", pa.bool_()),
-            ("archived", pa.bool_()),
-            ("disabled", pa.bool_()),
-            ("is_template", pa.bool_()),
-            ("visibility", pa.string()),
-            ("default_branch", pa.string()),
-            ("description", pa.string()),
-            ("homepage", pa.string()),
-            ("language", pa.string()),
-            ("license_key", pa.string()),
-            ("license_name", pa.string()),
-            ("topics_json", pa.string()),
-            ("created_at", pa.string()),
-            ("updated_at", pa.string()),
-            ("pushed_at", pa.string()),
-            ("size_kib", pa.int64()),
-            ("stargazers_count", pa.int64()),
-            ("watchers_count", pa.int64()),
-            ("subscribers_count", pa.int64()),
-            ("forks_count", pa.int64()),
-            ("open_issues_count", pa.int64()),
-            ("network_count", pa.int64()),
-            ("has_issues", pa.bool_()),
-            ("has_projects", pa.bool_()),
-            ("has_downloads", pa.bool_()),
-            ("has_wiki", pa.bool_()),
-            ("has_pages", pa.bool_()),
-            ("has_discussions", pa.bool_()),
-            ("mirror_url", pa.string()),
-            ("allow_forking", pa.bool_()),
-            ("web_commit_signoff_required", pa.bool_()),
-            ("clone_url", pa.string()),
-            ("ssh_url", pa.string()),
-            ("html_url", pa.string()),
+            ("path", pa.string()),
+            ("size_bytes", pa.int64()),
+            ("line_count", pa.int64()),
         ]
-    ),
-    "languages": pa.schema(
+    )
+)
+
+LANGUAGES_TYPE = pa.list_(
+    pa.struct(
         [
-            ("owner", pa.string()),
-            ("repo_name", pa.string()),
             ("language", pa.string()),
             ("bytes", pa.int64()),
         ]
-    ),
-    "contributors": pa.schema(
+    )
+)
+
+CONTRIBUTORS_TYPE = pa.list_(
+    pa.struct(
         [
-            ("owner", pa.string()),
-            ("repo_name", pa.string()),
             ("login", pa.string()),
             ("user_id", pa.int64()),
             ("contributions", pa.int64()),
             ("type", pa.string()),
             ("site_admin", pa.bool_()),
         ]
-    ),
-    "commit_activity_weekly": pa.schema(
-        [
-            ("owner", pa.string()),
-            ("repo_name", pa.string()),
-            ("week_unix", pa.int64()),
-            ("total_commits", pa.int64()),
-            ("days_json", pa.string()),
-        ]
-    ),
-    "code_frequency_weekly": pa.schema(
-        [
-            ("owner", pa.string()),
-            ("repo_name", pa.string()),
-            ("week_unix", pa.int64()),
-            ("additions", pa.int64()),
-            ("deletions", pa.int64()),
-        ]
-    ),
-    "participation_weekly": pa.schema(
-        [
-            ("owner", pa.string()),
-            ("repo_name", pa.string()),
-            ("week_index", pa.int64()),
-            ("all_commits", pa.int64()),
-            ("owner_commits", pa.int64()),
-        ]
-    ),
-    "punch_card": pa.schema(
-        [
-            ("owner", pa.string()),
-            ("repo_name", pa.string()),
-            ("day_of_week", pa.int64()),
-            ("hour_of_day", pa.int64()),
-            ("commits", pa.int64()),
-        ]
-    ),
-    "files": pa.schema(
-        [
-            ("owner", pa.string()),
-            ("repo_name", pa.string()),
-            ("repo_full_name", pa.string()),
-            ("default_branch", pa.string()),
-            ("path", pa.string()),
-            ("extension", pa.string()),
-            ("size_bytes", pa.int64()),
-            ("line_count", pa.int64()),
-            ("is_binary", pa.bool_()),
-        ]
-    ),
-    "run_manifest": pa.schema(
-        [
-            ("owner", pa.string()),
-            ("owner_type", pa.string()),
-            ("repo_count", pa.int64()),
-            ("generated_at_unix", pa.int64()),
-            ("output_dir", pa.string()),
-        ]
-    ),
-}
+    )
+)
+
+REPOSITORIES_SCHEMA = pa.schema(
+    [
+        ("owner", pa.string()),
+        ("owner_type", pa.string()),
+        ("repo_name", pa.string()),
+        ("full_name", pa.string()),
+        ("private", pa.bool_()),
+        ("fork", pa.bool_()),
+        ("archived", pa.bool_()),
+        ("disabled", pa.bool_()),
+        ("is_template", pa.bool_()),
+        ("visibility", pa.string()),
+        ("default_branch", pa.string()),
+        ("description", pa.string()),
+        ("homepage", pa.string()),
+        ("language", pa.string()),
+        ("license_key", pa.string()),
+        ("license_name", pa.string()),
+        ("topics_json", pa.string()),
+        ("created_at", pa.string()),
+        ("updated_at", pa.string()),
+        ("pushed_at", pa.string()),
+        ("size_kib", pa.int64()),
+        ("stargazers_count", pa.int64()),
+        ("watchers_count", pa.int64()),
+        ("subscribers_count", pa.int64()),
+        ("forks_count", pa.int64()),
+        ("open_issues_count", pa.int64()),
+        ("network_count", pa.int64()),
+        ("has_issues", pa.bool_()),
+        ("has_projects", pa.bool_()),
+        ("has_downloads", pa.bool_()),
+        ("has_wiki", pa.bool_()),
+        ("has_pages", pa.bool_()),
+        ("has_discussions", pa.bool_()),
+        ("mirror_url", pa.string()),
+        ("allow_forking", pa.bool_()),
+        ("web_commit_signoff_required", pa.bool_()),
+        ("clone_url", pa.string()),
+        ("ssh_url", pa.string()),
+        ("html_url", pa.string()),
+        ("languages", LANGUAGES_TYPE),
+        ("contributor_count", pa.int64()),
+        ("total_contributions", pa.int64()),
+        ("contributors", CONTRIBUTORS_TYPE),
+        ("commit_activity_json", pa.string()),
+        ("code_frequency_json", pa.string()),
+        ("participation_json", pa.string()),
+        ("punch_card_json", pa.string()),
+        ("file_inventory_ready", pa.bool_()),
+        ("file_inventory_error", pa.string()),
+        ("file_count", pa.int64()),
+        ("total_file_size_bytes", pa.int64()),
+        ("total_line_count", pa.int64()),
+        ("binary_file_count", pa.int64()),
+        ("files", FILES_TYPE),
+    ]
+)
 
 
 class GitHubApiError(RuntimeError):
@@ -166,16 +133,15 @@ class RepoContext:
     owner_type: str
     repo_name: str
     full_name: str
-    default_branch: str
+    default_branch: str | None
     clone_url: str
 
 
 class GitHubClient:
-    """Thin GitHub REST client with pagination and stats retries."""
+    """Thin GitHub REST client with pagination, retries, and rate-limit handling."""
 
     def __init__(self, token: str | None, timeout: int = 60) -> None:
         self.timeout = timeout
-        self.token = token
         self.session = requests.Session()
         headers = {
             "Accept": "application/vnd.github+json",
@@ -286,9 +252,7 @@ class GitHubClient:
 
         items = response.json()
         if not isinstance(items, list):
-            raise GitHubApiError(
-                f"Expected a list response from contributors endpoint for {full_name!r}."
-            )
+            raise GitHubApiError(f"Expected a list response from contributors endpoint for {full_name!r}.")
 
         next_url = response.links.get("next", {}).get("url")
         while next_url:
@@ -335,7 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default="output",
-        help="Directory where Parquet files will be written.",
+        help="Directory where repositories.parquet will be written.",
     )
     parser.add_argument(
         "--workspace-dir",
@@ -414,20 +378,39 @@ def clone_repo(repo: RepoContext, workspace_dir: Path, token: str | None) -> Pat
     if repo_path.exists():
         remove_tree(repo_path)
     repo_path.parent.mkdir(parents=True, exist_ok=True)
+
+    base_command = [
+        "git",
+        "-c",
+        "core.longpaths=true",
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        authenticated_clone_url(repo.clone_url, token),
+        str(repo_path),
+    ]
+
+    if repo.default_branch:
+        branch_command = base_command.copy()
+        branch_command[6:6] = ["--branch", repo.default_branch]
+        try:
+            subprocess.run(
+                branch_command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            return repo_path
+        except subprocess.CalledProcessError as exc:
+            if "Remote branch" not in (exc.stderr or ""):
+                raise
+            if repo_path.exists():
+                remove_tree(repo_path)
+
     subprocess.run(
-        [
-            "git",
-            "-c",
-            "core.longpaths=true",
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            repo.default_branch,
-            "--single-branch",
-            authenticated_clone_url(repo.clone_url, token),
-            str(repo_path),
-        ],
+        base_command,
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -457,44 +440,92 @@ def count_lines(path: Path) -> tuple[int | None, bool]:
     return line_count, False
 
 
-def collect_file_rows(repo: RepoContext, repo_path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def collect_files(repo_path: Path) -> tuple[list[dict[str, Any]], int, int, int]:
+    files: list[dict[str, Any]] = []
+    total_file_size_bytes = 0
+    total_line_count = 0
+    binary_file_count = 0
+
     for file_path in repo_path.rglob("*"):
         if not file_path.is_file():
             continue
         relative_path = file_path.relative_to(repo_path).as_posix()
         if relative_path.startswith(".git/"):
             continue
+
+        size_bytes = file_path.stat().st_size
         line_count, is_binary = count_lines(file_path)
-        rows.append(
+        total_file_size_bytes += size_bytes
+        if line_count is not None:
+            total_line_count += line_count
+        if is_binary:
+            binary_file_count += 1
+
+        files.append(
             {
-                "owner": repo.owner,
-                "repo_name": repo.repo_name,
-                "repo_full_name": repo.full_name,
-                "default_branch": repo.default_branch,
                 "path": relative_path,
-                "extension": file_path.suffix.lower() or None,
-                "size_bytes": file_path.stat().st_size,
+                "size_bytes": size_bytes,
                 "line_count": line_count,
-                "is_binary": is_binary,
             }
         )
-    return rows
+
+    return files, total_file_size_bytes, total_line_count, binary_file_count
 
 
-def write_parquet(table_name: str, rows: list[dict[str, Any]], output_dir: Path) -> None:
+def write_repositories_parquet(rows: list[dict[str, Any]], output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    schema = TABLE_SCHEMAS[table_name]
-    table = pa.Table.from_pylist(rows, schema=schema)
-    pq.write_table(table, output_dir / f"{table_name}.parquet")
+    output_path = output_dir / "repositories.parquet"
+    table = pa.Table.from_pylist(rows, schema=REPOSITORIES_SCHEMA)
+    pq.write_table(table, output_path)
+    return output_path
 
 
 def minimum_required_requests(repo_count: int) -> int:
     return 1 + (repo_count * 6)
 
 
-def repo_row(owner: str, owner_type: str, repo: dict[str, Any]) -> dict[str, Any]:
+def normalize_contributors(contributors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "login": item.get("login"),
+            "user_id": item.get("id"),
+            "contributions": item.get("contributions"),
+            "type": item.get("type"),
+            "site_admin": item.get("site_admin"),
+        }
+        for item in contributors
+    ]
+
+
+def contributor_summary(contributors: list[dict[str, Any]]) -> tuple[int, int, list[dict[str, Any]]]:
+    contributor_count = len(contributors)
+    total_contributions = sum(int(item.get("contributions") or 0) for item in contributors)
+    return contributor_count, total_contributions, normalize_contributors(contributors)
+
+
+def normalize_languages(languages: dict[str, int]) -> list[dict[str, Any]]:
+    return [{"language": language, "bytes": byte_count} for language, byte_count in languages.items()]
+
+
+def build_repo_row(
+    owner: str,
+    owner_type: str,
+    repo: dict[str, Any],
+    languages: dict[str, int],
+    contributors: list[dict[str, Any]],
+    commit_activity: Any,
+    code_frequency: Any,
+    participation: Any,
+    punch_card: Any,
+    files: list[dict[str, Any]],
+    file_inventory_ready: bool,
+    file_inventory_error: str | None,
+    total_file_size_bytes: int,
+    total_line_count: int,
+    binary_file_count: int,
+) -> dict[str, Any]:
     license_info = repo.get("license") or {}
+    contributor_count, total_contributions, normalized_contributors = contributor_summary(contributors)
     return {
         "owner": owner,
         "owner_type": owner_type,
@@ -512,7 +543,7 @@ def repo_row(owner: str, owner_type: str, repo: dict[str, Any]) -> dict[str, Any
         "language": repo.get("language"),
         "license_key": license_info.get("key"),
         "license_name": license_info.get("name"),
-        "topics_json": json.dumps(repo.get("topics", [])),
+        "topics_json": json.dumps(repo.get("topics", []), separators=(",", ":")),
         "created_at": repo.get("created_at"),
         "updated_at": repo.get("updated_at"),
         "pushed_at": repo.get("pushed_at"),
@@ -535,6 +566,21 @@ def repo_row(owner: str, owner_type: str, repo: dict[str, Any]) -> dict[str, Any
         "clone_url": repo.get("clone_url"),
         "ssh_url": repo.get("ssh_url"),
         "html_url": repo.get("html_url"),
+        "languages": normalize_languages(languages),
+        "contributor_count": contributor_count,
+        "total_contributions": total_contributions,
+        "contributors": normalized_contributors,
+        "commit_activity_json": json.dumps(commit_activity or [], separators=(",", ":")),
+        "code_frequency_json": json.dumps(code_frequency or [], separators=(",", ":")),
+        "participation_json": json.dumps(participation or {}, separators=(",", ":")),
+        "punch_card_json": json.dumps(punch_card or [], separators=(",", ":")),
+        "file_inventory_ready": file_inventory_ready,
+        "file_inventory_error": file_inventory_error,
+        "file_count": len(files),
+        "total_file_size_bytes": total_file_size_bytes,
+        "total_line_count": total_line_count,
+        "binary_file_count": binary_file_count,
+        "files": files,
     }
 
 
@@ -556,6 +602,7 @@ def main() -> int:
         repos = [repo for repo in repos if not repo.get("archived")]
     if args.max_repos is not None:
         repos = repos[: args.max_repos]
+
     rate_limit = client.fetch_rate_limit()["rate"]
     required_requests = minimum_required_requests(len(repos))
     remaining_requests = int(rate_limit["remaining"])
@@ -569,143 +616,82 @@ def main() -> int:
             f"Retry after about {reset_in_seconds} seconds or provide GitHub authentication."
         )
 
-    repo_rows: list[dict[str, Any]] = []
-    language_rows: list[dict[str, Any]] = []
-    contributor_rows: list[dict[str, Any]] = []
-    commit_activity_rows: list[dict[str, Any]] = []
-    code_frequency_rows: list[dict[str, Any]] = []
-    participation_rows: list[dict[str, Any]] = []
-    punch_card_rows: list[dict[str, Any]] = []
-    file_rows: list[dict[str, Any]] = []
+    repository_rows: list[dict[str, Any]] = []
 
     for repo_summary in repos:
-        repo_rows.append(repo_row(args.owner, owner_type, repo_summary))
-
         repo_context = RepoContext(
             repo_id=repo_summary["id"],
             owner=args.owner,
             owner_type=owner_type,
             repo_name=repo_summary["name"],
             full_name=repo_summary["full_name"],
-            default_branch=repo_summary["default_branch"],
+            default_branch=repo_summary.get("default_branch"),
             clone_url=repo_summary["clone_url"],
         )
 
+        print(f"Processing {repo_context.full_name}...", file=sys.stderr)
+
         languages = client.fetch_languages(repo_context.full_name)
-        for language, byte_count in languages.items():
-            language_rows.append(
-                {
-                    "owner": args.owner,
-                    "repo_name": repo_context.repo_name,
-                    "language": language,
-                    "bytes": byte_count,
-                }
-            )
-
         contributors = client.fetch_contributors(repo_context.full_name)
-        for contributor in contributors:
-            contributor_rows.append(
-                {
-                    "owner": args.owner,
-                    "repo_name": repo_context.repo_name,
-                    "login": contributor.get("login"),
-                    "user_id": contributor.get("id"),
-                    "contributions": contributor.get("contributions"),
-                    "type": contributor.get("type"),
-                    "site_admin": contributor.get("site_admin"),
-                }
-            )
+        commit_activity = client.fetch_stats(repo_context.full_name, "commit_activity")
+        code_frequency = client.fetch_stats(repo_context.full_name, "code_frequency")
+        participation = client.fetch_stats(repo_context.full_name, "participation")
+        punch_card = client.fetch_stats(repo_context.full_name, "punch_card")
 
-        commit_activity = client.fetch_stats(repo_context.full_name, "commit_activity") or []
-        for week in commit_activity:
-            commit_activity_rows.append(
-                {
-                    "owner": args.owner,
-                    "repo_name": repo_context.repo_name,
-                    "week_unix": week["week"],
-                    "total_commits": week["total"],
-                    "days_json": json.dumps(week["days"]),
-                }
-            )
-
-        code_frequency = client.fetch_stats(repo_context.full_name, "code_frequency") or []
-        for week_unix, additions, deletions in code_frequency:
-            code_frequency_rows.append(
-                {
-                    "owner": args.owner,
-                    "repo_name": repo_context.repo_name,
-                    "week_unix": week_unix,
-                    "additions": additions,
-                    "deletions": deletions,
-                }
-            )
-
-        participation = client.fetch_stats(repo_context.full_name, "participation") or {}
-        for index, (all_commits, owner_commits) in enumerate(
-            zip(participation.get("all", []), participation.get("owner", []), strict=False)
-        ):
-            participation_rows.append(
-                {
-                    "owner": args.owner,
-                    "repo_name": repo_context.repo_name,
-                    "week_index": index,
-                    "all_commits": all_commits,
-                    "owner_commits": owner_commits,
-                }
-            )
-
-        punch_card = client.fetch_stats(repo_context.full_name, "punch_card") or []
-        for day_of_week, hour_of_day, commits in punch_card:
-            punch_card_rows.append(
-                {
-                    "owner": args.owner,
-                    "repo_name": repo_context.repo_name,
-                    "day_of_week": day_of_week,
-                    "hour_of_day": hour_of_day,
-                    "commits": commits,
-                }
-            )
+        files: list[dict[str, Any]] = []
+        total_file_size_bytes = 0
+        total_line_count = 0
+        binary_file_count = 0
+        file_inventory_ready = False
+        file_inventory_error: str | None = None
 
         if repo_context.default_branch:
             try:
                 repo_path = clone_repo(repo_context, workspace_dir, token)
             except subprocess.CalledProcessError as exc:
-                stderr = (exc.stderr or "").strip()
+                file_inventory_error = (exc.stderr or "").strip()[:500]
                 print(
-                    f"Warning: clone failed for {repo_context.full_name} and file inventory will be skipped. "
-                    f"{stderr[:500]}",
+                    f"Warning: clone failed for {repo_context.full_name} and file inventory will be empty. "
+                    f"{file_inventory_error}",
                     file=sys.stderr,
                 )
             else:
                 try:
-                    file_rows.extend(collect_file_rows(repo_context, repo_path))
+                    (
+                        files,
+                        total_file_size_bytes,
+                        total_line_count,
+                        binary_file_count,
+                    ) = collect_files(repo_path)
+                    file_inventory_ready = True
                 finally:
                     if not args.keep_clones and repo_path.exists():
                         remove_tree(repo_path)
+        else:
+            file_inventory_error = "Repository has no default branch."
 
-    write_parquet("repos", repo_rows, output_dir)
-    write_parquet("languages", language_rows, output_dir)
-    write_parquet("contributors", contributor_rows, output_dir)
-    write_parquet("commit_activity_weekly", commit_activity_rows, output_dir)
-    write_parquet("code_frequency_weekly", code_frequency_rows, output_dir)
-    write_parquet("participation_weekly", participation_rows, output_dir)
-    write_parquet("punch_card", punch_card_rows, output_dir)
-    write_parquet("files", file_rows, output_dir)
-    write_parquet(
-        "run_manifest",
-        [
-            {
-                "owner": args.owner,
-                "owner_type": owner_type,
-                "repo_count": len(repos),
-                "generated_at_unix": int(time.time()),
-                "output_dir": str(output_dir),
-            }
-        ],
-        output_dir,
-    )
+        repository_rows.append(
+            build_repo_row(
+                owner=args.owner,
+                owner_type=owner_type,
+                repo=repo_summary,
+                languages=languages,
+                contributors=contributors,
+                commit_activity=commit_activity,
+                code_frequency=code_frequency,
+                participation=participation,
+                punch_card=punch_card,
+                files=files,
+                file_inventory_ready=file_inventory_ready,
+                file_inventory_error=file_inventory_error,
+                total_file_size_bytes=total_file_size_bytes,
+                total_line_count=total_line_count,
+                binary_file_count=binary_file_count,
+            )
+        )
 
-    print(f"Processed {len(repos)} repositories into {output_dir}")
+    output_path = write_repositories_parquet(repository_rows, output_dir)
+    print(f"Processed {len(repos)} repositories into {output_path}")
     return 0
 
 
