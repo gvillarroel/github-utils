@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import stat
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,9 +24,11 @@ import requests
 
 
 API_BASE_URL = "https://api.github.com"
-DEFAULT_STATS_RETRIES = 6
-DEFAULT_STATS_DELAY = 2.0
+DEFAULT_STATS_RETRIES = 2
+DEFAULT_STATS_DELAY = 1.0
 TEXT_FILE_SIZE_LIMIT = 5 * 1024 * 1024
+DEFAULT_RATE_LIMIT_BUFFER_SECONDS = 2
+DEFAULT_HTTP_RETRIES = 5
 
 
 TABLE_SCHEMAS: dict[str, pa.Schema] = {
@@ -157,6 +161,7 @@ class GitHubApiError(RuntimeError):
 
 @dataclass
 class RepoContext:
+    repo_id: int
     owner: str
     owner_type: str
     repo_name: str
@@ -170,6 +175,7 @@ class GitHubClient:
 
     def __init__(self, token: str | None, timeout: int = 60) -> None:
         self.timeout = timeout
+        self.token = token
         self.session = requests.Session()
         headers = {
             "Accept": "application/vnd.github+json",
@@ -180,6 +186,37 @@ class GitHubClient:
             headers["Authorization"] = f"Bearer {token}"
         self.session.headers.update(headers)
 
+    def _send_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> requests.Response:
+        for attempt in range(DEFAULT_HTTP_RETRIES):
+            try:
+                response = self.session.request(method, url, params=params, timeout=self.timeout)
+            except requests.RequestException as exc:
+                if attempt == DEFAULT_HTTP_RETRIES - 1:
+                    raise GitHubApiError(f"GitHub request failed after retries: {method} {url}: {exc}") from exc
+                time.sleep(2**attempt)
+                continue
+
+            if response.status_code in {403, 429} and response.headers.get("X-RateLimit-Remaining") == "0":
+                reset_at = int(response.headers.get("X-RateLimit-Reset", "0") or "0")
+                wait_seconds = max(0, reset_at - int(time.time()) + DEFAULT_RATE_LIMIT_BUFFER_SECONDS)
+                if wait_seconds > 0:
+                    print(
+                        f"GitHub rate limit reached. Waiting {wait_seconds} seconds for reset...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait_seconds)
+                else:
+                    time.sleep(DEFAULT_RATE_LIMIT_BUFFER_SECONDS)
+                continue
+            return response
+        raise GitHubApiError(f"GitHub request failed after retries: {method} {url}")
+
     def request(
         self,
         method: str,
@@ -189,7 +226,7 @@ class GitHubClient:
         expected_statuses: Iterable[int] = (200,),
     ) -> requests.Response:
         url = f"{API_BASE_URL}{path}"
-        response = self.session.request(method, url, params=params, timeout=self.timeout)
+        response = self._send_request(method, url, params=params)
         if response.status_code not in set(expected_statuses):
             raise GitHubApiError(
                 f"GitHub API request failed: {method} {url} "
@@ -204,7 +241,7 @@ class GitHubClient:
         items: list[dict[str, Any]] = []
 
         while url:
-            response = self.session.get(url, params=merged_params, timeout=self.timeout)
+            response = self._send_request("GET", url, params=merged_params)
             if response.status_code != 200:
                 raise GitHubApiError(
                     f"GitHub API request failed: GET {url} "
@@ -231,8 +268,8 @@ class GitHubClient:
             return self.paginate(f"/orgs/{owner}/repos", params={"type": "all", "sort": "full_name"})
         return self.paginate(f"/users/{owner}/repos", params={"type": "owner", "sort": "full_name"})
 
-    def fetch_repo_details(self, full_name: str) -> dict[str, Any]:
-        return self.request("GET", f"/repos/{full_name}").json()
+    def fetch_rate_limit(self) -> dict[str, Any]:
+        return self.request("GET", "/rate_limit").json()
 
     def fetch_languages(self, full_name: str) -> dict[str, int]:
         return self.request("GET", f"/repos/{full_name}/languages").json()
@@ -255,7 +292,7 @@ class GitHubClient:
 
         next_url = response.links.get("next", {}).get("url")
         while next_url:
-            page = self.session.get(next_url, timeout=self.timeout)
+            page = self._send_request("GET", next_url)
             if page.status_code != 200:
                 raise GitHubApiError(
                     f"GitHub API request failed: GET {next_url} "
@@ -302,7 +339,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--workspace-dir",
-        default=".cache/github-repo-clones",
+        default=str(Path(tempfile.gettempdir()) / "gh-repo-stats"),
         help="Directory used for temporary clones.",
     )
     parser.add_argument(
@@ -334,6 +371,28 @@ def ensure_git_available() -> None:
         raise RuntimeError("git is required but was not found in PATH.")
 
 
+def resolve_github_token(cli_token: str | None) -> str | None:
+    if cli_token:
+        return cli_token
+
+    env_token = os.environ.get("GITHUB_TOKEN")
+    if env_token:
+        return env_token
+
+    if shutil.which("gh") is None:
+        return None
+
+    result = subprocess.run(
+        ["gh", "auth", "token"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    token = result.stdout.strip()
+    return token or None
+
+
 def remove_tree(path: Path) -> None:
     def handle_remove_readonly(function: Any, target: str, excinfo: Any) -> None:
         os.chmod(target, stat.S_IWRITE)
@@ -350,13 +409,16 @@ def authenticated_clone_url(clone_url: str, token: str | None) -> str:
 
 
 def clone_repo(repo: RepoContext, workspace_dir: Path, token: str | None) -> Path:
-    repo_path = workspace_dir / repo.owner / repo.repo_name
+    repo_key = hashlib.sha1(f"{repo.repo_id}:{repo.full_name}".encode("utf-8"), usedforsecurity=False)
+    repo_path = workspace_dir / f"{repo.repo_id}-{repo_key.hexdigest()[:10]}"
     if repo_path.exists():
         remove_tree(repo_path)
     repo_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
             "git",
+            "-c",
+            "core.longpaths=true",
             "clone",
             "--depth",
             "1",
@@ -427,6 +489,10 @@ def write_parquet(table_name: str, rows: list[dict[str, Any]], output_dir: Path)
     pq.write_table(table, output_dir / f"{table_name}.parquet")
 
 
+def minimum_required_requests(repo_count: int) -> int:
+    return 1 + (repo_count * 6)
+
+
 def repo_row(owner: str, owner_type: str, repo: dict[str, Any]) -> dict[str, Any]:
     license_info = repo.get("license") or {}
     return {
@@ -475,8 +541,9 @@ def repo_row(owner: str, owner_type: str, repo: dict[str, Any]) -> dict[str, Any
 def main() -> int:
     args = parse_args()
     ensure_git_available()
+    token = resolve_github_token(args.token)
 
-    client = GitHubClient(token=args.token)
+    client = GitHubClient(token=token)
     owner_type = args.owner_type
     if owner_type == "auto":
         owner_type = client.resolve_owner_type(args.owner)
@@ -489,6 +556,18 @@ def main() -> int:
         repos = [repo for repo in repos if not repo.get("archived")]
     if args.max_repos is not None:
         repos = repos[: args.max_repos]
+    rate_limit = client.fetch_rate_limit()["rate"]
+    required_requests = minimum_required_requests(len(repos))
+    remaining_requests = int(rate_limit["remaining"])
+    if remaining_requests < required_requests:
+        reset_at = int(rate_limit["reset"])
+        reset_in_seconds = max(0, reset_at - int(time.time()))
+        raise RuntimeError(
+            "Not enough GitHub API quota to run safely. "
+            f"Remaining core requests: {remaining_requests}. "
+            f"Estimated minimum required: {required_requests}. "
+            f"Retry after about {reset_in_seconds} seconds or provide GitHub authentication."
+        )
 
     repo_rows: list[dict[str, Any]] = []
     language_rows: list[dict[str, Any]] = []
@@ -500,16 +579,16 @@ def main() -> int:
     file_rows: list[dict[str, Any]] = []
 
     for repo_summary in repos:
-        repo_details = client.fetch_repo_details(repo_summary["full_name"])
-        repo_rows.append(repo_row(args.owner, owner_type, repo_details))
+        repo_rows.append(repo_row(args.owner, owner_type, repo_summary))
 
         repo_context = RepoContext(
+            repo_id=repo_summary["id"],
             owner=args.owner,
             owner_type=owner_type,
-            repo_name=repo_details["name"],
-            full_name=repo_details["full_name"],
-            default_branch=repo_details["default_branch"],
-            clone_url=repo_details["clone_url"],
+            repo_name=repo_summary["name"],
+            full_name=repo_summary["full_name"],
+            default_branch=repo_summary["default_branch"],
+            clone_url=repo_summary["clone_url"],
         )
 
         languages = client.fetch_languages(repo_context.full_name)
@@ -588,12 +667,21 @@ def main() -> int:
             )
 
         if repo_context.default_branch:
-            repo_path = clone_repo(repo_context, workspace_dir, args.token)
             try:
-                file_rows.extend(collect_file_rows(repo_context, repo_path))
-            finally:
-                if not args.keep_clones and repo_path.exists():
-                    remove_tree(repo_path)
+                repo_path = clone_repo(repo_context, workspace_dir, token)
+            except subprocess.CalledProcessError as exc:
+                stderr = (exc.stderr or "").strip()
+                print(
+                    f"Warning: clone failed for {repo_context.full_name} and file inventory will be skipped. "
+                    f"{stderr[:500]}",
+                    file=sys.stderr,
+                )
+            else:
+                try:
+                    file_rows.extend(collect_file_rows(repo_context, repo_path))
+                finally:
+                    if not args.keep_clones and repo_path.exists():
+                        remove_tree(repo_path)
 
     write_parquet("repos", repo_rows, output_dir)
     write_parquet("languages", language_rows, output_dir)

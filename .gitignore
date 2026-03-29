@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+
+.cache/
+.tmp-output/
+output/
+
+*.parquet

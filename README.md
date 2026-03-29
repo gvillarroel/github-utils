@@ -20,7 +20,13 @@ The script writes one Parquet file per dataset:
 
 - Python 3.10+
 - `git`
-- A GitHub token in `GITHUB_TOKEN` for higher API limits and private repositories
+- GitHub authentication for higher API limits and private repositories
+
+Authentication is resolved in this order:
+
+- `--token`
+- `GITHUB_TOKEN`
+- `gh auth token` if the GitHub CLI is already logged in
 
 Install dependencies:
 
@@ -53,3 +59,4 @@ python github_repo_stats_to_parquet.py --owner some-account --owner-type auto
 - File inventories are computed from shallow clones of each repository.
 - Repositories without a default branch are skipped for file inventory collection.
 - Large files above 5 MiB keep size information, but line counting is skipped to avoid excessive memory use.
+- The script checks the available GitHub API quota before the run and fails fast if the remaining quota is not enough for the selected repository count.
