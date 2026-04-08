@@ -119,6 +119,12 @@ These are intended as focused alternatives that separate transport and extractio
 
 Use these when you want to compare collection strategies directly or evolve them independently without changing the three main exporters.
 
+Current primary direction:
+
+- default strategy for future requirements: `strategies/incremental_refresh/exporter.py`
+- default operational profile: `tree-only`
+- preferred full-fidelity fallback: `strategies/shallow_clone/exporter.py`
+
 ## Output
 
 Each run writes a single file selected by `--output-format`:
